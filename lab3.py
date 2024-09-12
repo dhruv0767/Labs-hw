@@ -1,7 +1,6 @@
 import streamlit as st
 import openai
 import PyPDF2
-import time
 
 def run():
     st.subheader("Dhruv's Question Answering Chatbot")
@@ -19,6 +18,8 @@ def run():
         st.session_state['messages'] = []
     if 'document' not in st.session_state:
         st.session_state['document'] = None
+    if 'waiting_for_more_info' not in st.session_state:
+        st.session_state['waiting_for_more_info'] = False
 
     # OpenAI API key input
     openai_api_key = st.text_input("OpenAI API Key", type="password")
@@ -61,37 +62,79 @@ def run():
                 return
 
     # Chatbot functionality
-    question = st.chat_input("Ask a question about the document:")
+    if not st.session_state['waiting_for_more_info']:
+        question = st.chat_input("Ask a question about the document:")
 
-    if question:
-        st.chat_message("user").write(question)
-        st.session_state['messages'].append({"role": "user", "content": question})
+        if question:
+            st.chat_message("user").write(question)
+            st.session_state['messages'].append({"role": "user", "content": question})
 
-        if st.session_state['document'] is not None:
+            if st.session_state['document'] is not None:
+                try:
+                    messages = [
+                        {"role": "system", "content": f"Here's a document: {st.session_state['document']}"},
+                        *st.session_state['messages']
+                    ]
+
+                    response = openai.ChatCompletion.create(
+                        model="gpt-3.5-turbo",
+                        messages=messages,
+                        stream=True
+                    )
+
+                    message_placeholder = st.empty()
+                    full_response = ""
+
+                    for chunk in response:
+                        full_response += chunk['choices'][0].get('delta', {}).get('content', '')
+                        message_placeholder.markdown(full_response + "▌")
+                    
+                    message_placeholder.markdown(full_response)
+                    st.session_state['messages'].append({"role": "assistant", "content": full_response})
+
+                    # Set waiting_for_more_info to True after each response
+                    st.session_state['waiting_for_more_info'] = True
+
+                except Exception as e:
+                    st.error(f"Error generating answer: {str(e)}")
+
+    # Handle the follow-up question
+    if st.session_state['waiting_for_more_info']:
+        more_info = st.radio("Do you want more information?", ("Yes", "No"))
+        if st.button("Submit"):
+            if more_info == "Yes":
+                st.session_state['messages'].append({"role": "user", "content": "Please provide more information."})
+                try:
+                    messages = [
+                        {"role": "system", "content": f"Here's a document: {st.session_state['document']}"},
+                        *st.session_state['messages']
+                    ]
+
+                    response = openai.ChatCompletion.create(
+                        model="gpt-3.5-turbo",
+                        messages=messages,
+                        stream=True
+                    )
+
+                    message_placeholder = st.empty()
+                    full_response = ""
+
+                    for chunk in response:
+                        full_response += chunk['choices'][0].get('delta', {}).get('content', '')
+                        message_placeholder.markdown(full_response + "▌")
+                    
+                    message_placeholder.markdown(full_response)
+                    st.session_state['messages'].append({"role": "assistant", "content": full_response})
+
+                except Exception as e:
+                    st.error(f"Error generating additional information: {str(e)}")
+            else:
+                st.write("What question do you want me to answer?")
+            st.session_state['waiting_for_more_info'] = False
             try:
-                messages = [
-                    {"role": "system", "content": f"Here's a document: {st.session_state['document']}"},
-                    *st.session_state['messages']
-                ]
-
-                response = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=messages,
-                    stream=True
-                )
-
-                message_placeholder = st.empty()
-                full_response = ""
-
-                for chunk in response:
-                    full_response += chunk['choices'][0].get('delta', {}).get('content', '')
-                    message_placeholder.markdown(full_response + "▌")
-                
-                message_placeholder.markdown(full_response)
-                st.session_state['messages'].append({"role": "assistant", "content": full_response})
-
-            except Exception as e:
-                st.error(f"Error generating answer: {str(e)}")
+                st.rerun()
+            except AttributeError:
+                st.rerun()
 
     # Display conversation history
     st.subheader("Conversation History")
