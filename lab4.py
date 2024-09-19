@@ -3,58 +3,55 @@ import openai
 import PyPDF2
 import chromadb
 from chromadb.utils import embedding_functions
+import os
 
-def create_and_test_vectordb(pdf_files):
-    if 'Lab4_vectorDB' not in st.session_state:
-        # Initialize ChromaDB client
-        client = chromadb.Client()
-        
-        # Create OpenAI embedding function
-        openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-            api_key=st.session_state.openai_api_key,
-            model_name="text-embedding-3-small"
-        )
-        
-        # Create ChromaDB collection
-        collection = client.create_collection(
-            name="Lab4Collection",
-            embedding_function=openai_ef
-        )
-        
-        # Add documents to the collection
-        for pdf_file in pdf_files:
-            text = read_pdf(pdf_file)
+def create_chroma_db():
+    # Initialize ChromaDB client
+    client = chromadb.Client()
+
+    # Create OpenAI embedding function
+    openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+        api_key=st.session_state.openai_api_key,
+        model_name="text-embedding-3-small"
+    )
+
+    # Create collection
+    collection = client.create_collection(
+        name="Lab4Collection",
+        embedding_function=openai_ef
+    )
+
+    # Read PDF files and add to collection
+    pdf_dir = "pdf_files"  # Assuming PDF files are in a directory named 'pdf_files'
+    for filename in os.listdir(pdf_dir):
+        if filename.endswith(".pdf"):
+            file_path = os.path.join(pdf_dir, filename)
+            text = read_pdf(file_path)
             collection.add(
                 documents=[text],
-                metadatas=[{"filename": pdf_file.name}],
-                ids=[pdf_file.name]
+                metadatas=[{"filename": filename}],
+                ids=[filename]
             )
-        
-        # Store the collection in session state
-        st.session_state.Lab4_vectorDB = collection
-    
-    # Test the vectorDB
-    test_queries = ["Generative AI", "Text Mining", "Data Science Overview"]
-    for query in test_queries:
-        results = st.session_state.Lab4_vectorDB.query(
-            query_texts=[query],
-            n_results=3
-        )
-        st.subheader(f"Top 3 documents for query: '{query}'")
-        for i, doc in enumerate(results['metadatas'][0], 1):
-            st.write(f"{i}. {doc['filename']}")
-        st.write("---")
 
-def run():
-    st.subheader("Dhruv's Question Answering Chatbot")
+    return collection
 
-    # Function to read PDF file
-    def read_pdf(uploaded_file):
-        pdf_reader = PyPDF2.PdfReader(uploaded_file)
+def read_pdf(file_path):
+    with open(file_path, "rb") as file:
+        pdf_reader = PyPDF2.PdfReader(file)
         text = ""
         for page in pdf_reader.pages:
             text += page.extract_text()
-        return text
+    return text
+
+def test_vector_db(collection, query):
+    results = collection.query(
+        query_texts=[query],
+        n_results=3
+    )
+    return [result['filename'] for result in results['metadatas'][0]]
+
+def run():
+    st.subheader("Dhruv's Question Answering Chatbot")
 
     # Initialize session state
     if 'messages' not in st.session_state:
@@ -82,19 +79,123 @@ def run():
         st.error("Invalid API key!!! Please try again.", icon="❌")
         return
 
-    # File uploader for multiple PDF files
-    uploaded_files = st.file_uploader(
-        "Upload PDF documents", type="pdf", accept_multiple_files=True,
-        help="Upload up to 7 PDF files"
+    # Create ChromaDB collection if not already created
+    if 'Lab4_vectorDB' not in st.session_state:
+        st.session_state.Lab4_vectorDB = create_chroma_db()
+        st.success("ChromaDB collection created successfully!")
+
+    # Test the vector database
+    st.subheader("Vector Database Test")
+    test_query = st.selectbox("Select a test query:", ["Generative AI", "Text Mining", "Data Science Overview"])
+    if st.button("Run Test Query"):
+        results = test_vector_db(st.session_state.Lab4_vectorDB, test_query)
+        st.write("Top 3 relevant documents:")
+        for i, filename in enumerate(results, 1):
+            st.write(f"{i}. {filename}")
+
+    # File uploader
+    uploaded_file = st.file_uploader(
+        "Upload a document (.pdf or .txt)", type=("pdf", "txt"),
+        help="Supported formats: .pdf, .txt"
     )
 
-    if uploaded_files and len(uploaded_files) == 7:
-        if st.button("Process and Test VectorDB"):
-            create_and_test_vectordb(uploaded_files)
-    elif uploaded_files:
-        st.warning("Please upload exactly 7 PDF files.")
+    if uploaded_file is not None:
+        if st.button("Process"):
+            try:
+                if uploaded_file.type == "text/plain":
+                    document = uploaded_file.getvalue().decode()
+                elif uploaded_file.type == "application/pdf":
+                    document = read_pdf(uploaded_file)
+                else:
+                    st.error("Unsupported file type. Please upload a .pdf or .txt file.")
+                    return
 
-    # ... (rest of the existing code)
+                st.session_state['document'] = document
+                st.success("File processed successfully!")
+            except Exception as e:
+                st.error(f"Error processing file: {str(e)}")
+                return
+
+    # Chatbot functionality
+    if not st.session_state['waiting_for_more_info']:
+        question = st.chat_input("Ask a question about the document:")
+
+        if question:
+            st.chat_message("user").write(question)
+            st.session_state['messages'].append({"role": "user", "content": question})
+
+            if st.session_state['document'] is not None:
+                try:
+                    messages = [
+                        {"role": "system", "content": f"Here's a document: {st.session_state['document']}"},
+                        *st.session_state['messages']
+                    ]
+
+                    response = openai.ChatCompletion.create(
+                        model="gpt-3.5-turbo",
+                        messages=messages,
+                        stream=True
+                    )
+
+                    message_placeholder = st.empty()
+                    full_response = ""
+
+                    for chunk in response:
+                        full_response += chunk['choices'][0].get('delta', {}).get('content', '')
+                        message_placeholder.markdown(full_response + "▌")
+                    
+                    message_placeholder.markdown(full_response)
+                    st.session_state['messages'].append({"role": "assistant", "content": full_response})
+
+                    # Set waiting_for_more_info to True after each response
+                    st.session_state['waiting_for_more_info'] = True
+
+                except Exception as e:
+                    st.error(f"Error generating answer: {str(e)}")
+
+    # Handle the follow-up question
+    if st.session_state['waiting_for_more_info']:
+        more_info = st.radio("Do you want more information?", ("Yes", "No"))
+        if st.button("Submit"):
+            if more_info == "Yes":
+                st.session_state['messages'].append({"role": "user", "content": " Please provide more information."})
+                try:
+                    messages = [
+                        {"role": "system", "content": f"Here's a document: {st.session_state['document']}"},
+                        *st.session_state['messages']
+                    ]
+
+                    response = openai.ChatCompletion.create(
+                        model="gpt-3.5-turbo",
+                        messages=messages,
+                        stream=True
+                    )
+
+                    message_placeholder = st.empty()
+                    full_response = ""
+
+                    for chunk in response:
+                        full_response += chunk['choices'][0].get('delta', {}).get('content', '')
+                        message_placeholder.markdown(full_response + "▌")
+                    
+                    message_placeholder.markdown(full_response)
+                    st.session_state['messages'].append({"role": "assistant", "content": full_response})
+
+                except Exception as e:
+                    st.error(f"Error generating additional information: {str(e)}")
+            else:
+                st.write("What question do you want me to answer?")
+            st.session_state['waiting_for_more_info'] = False
+            try:
+                st.rerun()
+            except AttributeError:
+                st.rerun()
+
+    # Display conversation history
+    st.subheader("Conversation History")
+    for message in st.session_state['messages']:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
 if __name__ == "__main__":
     run()
