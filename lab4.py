@@ -5,6 +5,10 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 import os
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 
 def create_chroma_db():
     # Initialize ChromaDB client with in-memory storage
