@@ -103,7 +103,7 @@ def run():
         more_info = st.radio("Do you want more information?", ("Yes", "No"))
         if st.button("Submit"):
             if more_info == "Yes":
-                st.session_state['messages'].append({"role": "user", "content": "Please provide more information."})
+                st.session_state['messages'].append({"role": "user", "content": " Please provide more information."})
                 try:
                     messages = [
                         {"role": "system", "content": f"Here's a document: {st.session_state['document']}"},

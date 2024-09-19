@@ -2,6 +2,7 @@ import streamlit as st
 import lab1
 import lab2
 import lab3
+import lab4
 
 # Title for the main page
 st.title('Simple Streamlit App')
@@ -28,3 +29,6 @@ elif selection == "Lab 2":
 # Lab 3 Page
 elif selection == "Lab 3":
     lab3.run()
+
+elif selection == "Lab 4":
+    lab4.run()
