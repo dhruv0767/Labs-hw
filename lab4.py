@@ -1,155 +1,125 @@
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+
 import streamlit as st
 import openai
+import chromadb
+from chromadb.utils import embedding_functions
 import PyPDF2
+import os
 
-# Try to fix SQLite3 version issue
-try:
-    import pysqlite3 as sqlite3  # Use pysqlite3 as a replacement
-    sqlite3 = pysqlite3  # Override the default sqlite3
-except ImportError:
-    import sqlite3  # Fallback if pysqlite3 is not installed
+# Set up OpenAI API key
+openai.api_key = st.secrets["openai"]["api_key"]
 
-def run():
-    st.subheader("Dhruv's Question Answering Chatbot")
-
-    # Fetch OpenAI API key from secrets
-    openai_api_key = st.secrets["openai"]["api_key"]
-
-    # Function to read PDF file
-    def read_pdf(uploaded_file):
-        pdf_reader = PyPDF2.PdfReader(uploaded_file)
+# Function to read PDF files
+def read_pdf(file_path):
+    with open(file_path, 'rb') as file:
+        reader = PyPDF2.PdfReader(file)
         text = ""
-        for page in pdf_reader.pages:
+        for page in reader.pages:
             text += page.extract_text()
-        return text
+    return text
 
-    # Initialize session state
-    if 'messages' not in st.session_state:
-        st.session_state['messages'] = []
-    if 'document' not in st.session_state:
-        st.session_state['document'] = None
-    if 'waiting_for_more_info' not in st.session_state:
-        st.session_state['waiting_for_more_info'] = False
-
-    # Validate OpenAI API key
-    if not openai_api_key:
-        st.error("OpenAI API key not found in secrets.toml file!", icon="❌")
-        return
-
-    # Set up OpenAI client
-    openai.api_key = openai_api_key
-
-    try:
-        # Validate API key by checking available models
-        openai.Model.list()
-        st.success("API key is valid!", icon="✅")
-    except Exception as e:
-        st.error(f"Invalid API key or OpenAI service error: {str(e)}", icon="❌")
-        return
-
-    # File uploader
-    uploaded_file = st.file_uploader(
-        "Upload a document (.pdf or .txt)", type=("pdf", "txt"),
-        help="Supported formats: .pdf, .txt"
+# Function to create ChromaDB collection
+def create_chroma_collection():
+    # Create ChromaDB client
+    client = chromadb.Client()
+    
+    # Create OpenAI embedding function
+    openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+        api_key=openai.api_key,
+        model_name="text-embedding-3-small"
     )
+    
+    # Create collection
+    collection = client.create_collection(
+        name="Lab4Collection",
+        embedding_function=openai_ef
+    )
+    
+    # Process PDF files
+    pdf_dir = "pdf_files"  # Directory containing PDF files
+    for filename in os.listdir(pdf_dir):
+        if filename.endswith(".pdf"):
+            file_path = os.path.join(pdf_dir, filename)
+            text = read_pdf(file_path)
+            
+            # Add document to collection
+            collection.add(
+                documents=[text],
+                metadatas=[{"filename": filename}],
+                ids=[filename]
+            )
+    
+    return collection
 
-    if uploaded_file is not None:
-        if st.button("Process"):
-            try:
-                if uploaded_file.type == "text/plain":
-                    document = uploaded_file.getvalue().decode()
-                elif uploaded_file.type == "application/pdf":
-                    document = read_pdf(uploaded_file)
-                else:
-                    st.error("Unsupported file type. Please upload a .pdf or .txt file.")
-                    return
+# Function to get or create vector database
+def get_or_create_vectordb():
+    if 'Lab4_vectorDB' not in st.session_state:
+        st.session_state.Lab4_vectorDB = create_chroma_collection()
+    return st.session_state.Lab4_vectorDB
 
-                st.session_state['document'] = document
-                st.success("File processed successfully!")
-            except Exception as e:
-                st.error(f"Error processing file: {str(e)}")
-                return
+# Function to search vector database
+def search_vectordb(query, k=3):
+    collection = get_or_create_vectordb()
+    results = collection.query(
+        query_texts=[query],
+        n_results=k
+    )
+    return results
 
-    # Chatbot functionality
-    if not st.session_state['waiting_for_more_info']:
-        question = st.chat_input("Ask a question about the document:")
+# Function to generate response using OpenAI
+def generate_response(messages):
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=messages
+    )
+    return response.choices[0].message['content']
 
-        if question:
-            st.chat_message("user").write(question)
-            st.session_state['messages'].append({"role": "user", "content": question})
+# Streamlit app
+def main():
+    st.title("Course Information Chatbot")
 
-            if st.session_state['document'] is not None:
-                try:
-                    messages = [
-                        {"role": "system", "content": f"Here's a document: {st.session_state['document']}"},
-                        *st.session_state['messages']
-                    ]
+    # Initialize vector database
+    vectordb = get_or_create_vectordb()
 
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=messages,
-                        stream=True
-                    )
+    # Initialize chat history
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
 
-                    message_placeholder = st.empty()
-                    full_response = ""
-
-                    for chunk in response:
-                        full_response += chunk['choices'][0].get('delta', {}).get('content', '')
-                        message_placeholder.markdown(full_response + "▌")
-                    
-                    message_placeholder.markdown(full_response)
-                    st.session_state['messages'].append({"role": "assistant", "content": full_response})
-
-                    # Set waiting_for_more_info to True after each response
-                    st.session_state['waiting_for_more_info'] = True
-
-                except Exception as e:
-                    st.error(f"Error generating answer: {str(e)}")
-
-    # Handle the follow-up question
-    if st.session_state['waiting_for_more_info']:
-        more_info = st.radio("Do you want more information?", ("Yes", "No"))
-        if st.button("Submit"):
-            if more_info == "Yes":
-                st.session_state['messages'].append({"role": "user", "content": " Please provide more information."})
-                try:
-                    messages = [
-                        {"role": "system", "content": f"Here's a document: {st.session_state['document']}"},
-                        *st.session_state['messages']
-                    ]
-
-                    response = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
-                        messages=messages,
-                        stream=True
-                    )
-
-                    message_placeholder = st.empty()
-                    full_response = ""
-
-                    for chunk in response:
-                        full_response += chunk['choices'][0].get('delta', {}).get('content', '')
-                        message_placeholder.markdown(full_response + "▌")
-                    
-                    message_placeholder.markdown(full_response)
-                    st.session_state['messages'].append({"role": "assistant", "content": full_response})
-
-                except Exception as e:
-                    st.error(f"Error generating additional information: {str(e)}")
-            else:
-                st.write("What question do you want me to answer?")
-            st.session_state['waiting_for_more_info'] = False
-            try:
-                st.rerun()
-            except AttributeError:
-                st.rerun()
-
-    # Display conversation history
-    st.subheader("Conversation History")
-    for message in st.session_state['messages']:
+    # Display chat messages
+    for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
+    # Chat input
+    if prompt := st.chat_input("Ask about the course"):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Search vector database
+        search_results = search_vectordb(prompt)
+
+        # Prepare context for the LLM
+        context = "Based on the following information from course documents:\n\n"
+        for doc, metadata in zip(search_results['documents'][0], search_results['metadatas'][0]):
+            context += f"From {metadata['filename']}:\n{doc}\n\n"
+
+        # Prepare messages for the LLM
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that answers questions about a course based on the provided information. If the information is not in the context, say so."},
+            {"role": "user", "content": f"{context}\n\nQuestion: {prompt}"}
+        ]
+
+        # Generate response
+        with st.chat_message("assistant"):
+            response = generate_response(messages)
+            st.markdown(response)
+
+        # Add assistant's response to chat history
+        st.session_state.messages.append({"role": "assistant", "content": response})
+
 if __name__ == "__main__":
-    run()
+    main()
