@@ -1,125 +1,124 @@
+import streamlit as st
+from openai import OpenAI
 __import__('pysqlite3')
 import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-
-import streamlit as st
-import openai
 import chromadb
 from chromadb.utils import embedding_functions
 import PyPDF2
 import os
 
-# Set up OpenAI API key
-openai.api_key = st.secrets["openai"]["api_key"]
+def run():
+    # Initialize OpenAI client
+    openai_client = OpenAI(api_key=st.secrets["openai_api_key"])
 
-# Function to read PDF files
-def read_pdf(file_path):
-    with open(file_path, 'rb') as file:
-        reader = PyPDF2.PdfReader(file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text()
-    return text
-
-# Function to create ChromaDB collection
-def create_chroma_collection():
-    # Create ChromaDB client
-    client = chromadb.Client()
-    
-    # Create OpenAI embedding function
-    openai_ef = embedding_functions.OpenAIEmbeddingFunction(
-        api_key=openai.api_key,
-        model_name="text-embedding-3-small"
-    )
-    
-    # Create collection
-    collection = client.create_collection(
-        name="Lab4Collection",
-        embedding_function=openai_ef
-    )
-    
-    # Process PDF files
-    pdf_dir = "pdf_files"  # Directory containing PDF files
-    for filename in os.listdir(pdf_dir):
-        if filename.endswith(".pdf"):
-            file_path = os.path.join(pdf_dir, filename)
-            text = read_pdf(file_path)
+    # Function to create ChromaDB collection and embed PDFs
+    def create_chromadb_collection(pdf_files):
+        if 'HW4' not in st.session_state:
+            # Initialize ChromaDB client with persistent storage
+            chroma_client = chromadb.PersistentClient()
+            st.session_state.HW4 = chroma_client.get_or_create_collection(name="HW4_collection")
             
-            # Add document to collection
-            collection.add(
-                documents=[text],
-                metadatas=[{"filename": filename}],
-                ids=[filename]
+            # Set up OpenAI embedding function
+            openai_embedder = embedding_functions.OpenAIEmbeddingFunction(
+                api_key=st.secrets["openai_api_key"], 
+                model_name="text-embedding-ada-002"
             )
-    
-    return collection
+            
+            # Loop through provided PDF files, convert to text, and add to the vector database
+            for file in pdf_files:
+                try:
+                    # Read PDF file and extract text
+                    pdf_text = ""
+                    pdf_reader = PyPDF2.PdfReader(file)
+                    for page in pdf_reader.pages:
+                        pdf_text += page.extract_text()
+                    
+                    # Add document to ChromaDB collection with embeddings
+                    st.session_state.HW4.add(
+                        documents=[pdf_text],
+                        metadatas=[{"filename": file.name}],
+                        ids=[file.name]
+                    )
+                except Exception as e:
+                    st.error(f"Error processing {file.name}: {e}")
+            
+            st.success("ChromaDB has been created!")
 
-# Function to get or create vector database
-def get_or_create_vectordb():
-    if 'Lab4_vectorDB' not in st.session_state:
-        st.session_state.Lab4_vectorDB = create_chroma_collection()
-    return st.session_state.Lab4_vectorDB
+    # Function to query the vector database and get relevant context
+    def get_relevant_context(query):
+        if 'HW4' in st.session_state:
+            results = st.session_state.HW4.query(
+                query_texts=[query],
+                n_results=5,
+                include=["documents", "metadatas"]
+            )
+            
+            context = ""
+            for doc, metadata in zip(results['documents'][0], results['metadatas'][0]):
+                new_context = f"From document '{metadata['filename']}':\n{doc}\n\n"
+                context += new_context
+            
+            return context
+        return ""
 
-# Function to search vector database
-def search_vectordb(query, k=3):
-    collection = get_or_create_vectordb()
-    results = collection.query(
-        query_texts=[query],
-        n_results=k
-    )
-    return results
+    # Function to generate response using OpenAI
+    def generate_response(messages):
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                max_tokens=150
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"Error: {str(e)}"
 
-# Function to generate response using OpenAI
-def generate_response(messages):
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=messages
-    )
-    return response.choices[0].message['content']
+    # Streamlit application
+    st.title("Understanding your courses!")
 
-# Streamlit app
-def main():
-    st.title("Course Information Chatbot")
+    # Load PDF files
+    pdf_files = st.file_uploader("Upload your PDF files", accept_multiple_files=True, type=["pdf"])
 
-    # Initialize vector database
-    vectordb = get_or_create_vectordb()
+    # Create ChromaDB collection and embed documents if not already created
+    if st.button("Create ChromaDB") and pdf_files:
+        create_chromadb_collection(pdf_files)
 
     # Initialize chat history
-    if 'messages' not in st.session_state:
+    if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Display chat messages
+    # Display chat messages from history on app rerun
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Chat input
-    if prompt := st.chat_input("Ask about the course"):
+    # React to user input
+    if prompt := st.chat_input("What questions do you have?"):
+        # Display user message in chat message container
+        st.chat_message("user").markdown(prompt)
+        # Add user message to chat history
         st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
 
-        # Search vector database
-        search_results = search_vectordb(prompt)
-
-        # Prepare context for the LLM
-        context = "Based on the following information from course documents:\n\n"
-        for doc, metadata in zip(search_results['documents'][0], search_results['metadatas'][0]):
-            context += f"From {metadata['filename']}:\n{doc}\n\n"
+        context = get_relevant_context(prompt)
 
         # Prepare messages for the LLM
+        system_message = "You are a helpful assistant that answers questions about a course based on the provided context. If the answer is not in the context, say you don't have that information."
+        user_message = f"Context: {context}\n\nQuestion: {prompt}"
+
         messages = [
-            {"role": "system", "content": "You are a helpful assistant that answers questions about a course based on the provided information. If the information is not in the context, say so."},
-            {"role": "user", "content": f"{context}\n\nQuestion: {prompt}"}
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message}
         ]
 
         # Generate response
-        with st.chat_message("assistant"):
-            response = generate_response(messages)
-            st.markdown(response)
+        response = generate_response(messages)
 
-        # Add assistant's response to chat history
+        # Display assistant response in chat message container
+        with st.chat_message("assistant"):
+            st.markdown(response)
+        # Add assistant response to chat history
         st.session_state.messages.append({"role": "assistant", "content": response})
 
 if __name__ == "__main__":
-    main()
+    run()

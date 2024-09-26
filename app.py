@@ -9,7 +9,7 @@ st.title('Simple Streamlit App')
 
 # Sidebar selection
 st.sidebar.title("Navigation")
-selection = st.sidebar.radio("Go to", ["Home", "Lab 1", "Lab 2", "Lab 3"])
+selection = st.sidebar.radio("Go to", ["Home", "Lab 1", "Lab 2", "Lab 3", "Lab 4"])
 
 # Home Page
 if selection == "Home":
